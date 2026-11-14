@@ -1,5 +1,23 @@
 # Release Notes
 
+## Version 0.0.210 (2026-11-14)
+
+### Features
+
+- New external cost statistic `octopus_germany:electricity_<account>_cost`
+  (EUR, hourly). Each quarter-hour's consumption is multiplied by that
+  quarter-hour's dynamic gross unit price before summing per hour; the gross
+  daily standing charge is spread evenly across the local day's hours
+  (23/24/25 on DST days). Use it with `period: day` in a statistics graph or
+  as the grid consumption cost statistic in the Energy Dashboard.
+- Quarter-hour forecast prices are captured on every reconciliation run and
+  kept for 32 days, because the API only publishes prices for today and
+  tomorrow. Costs therefore start from installation; hours without a captured
+  price are skipped and counted in the log. Fixed-price (non-dynamic)
+  tariffs are priced from the agreement without capture.
+- Cost statistics are written after the consumption checkpoint and never
+  block it. Diagnostics include the cached price count.
+
 ## Version 0.0.209 (2026-11-14)
 
 ### Changes

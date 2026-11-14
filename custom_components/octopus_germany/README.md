@@ -57,6 +57,7 @@ Sign up through my referral link and receive **150 €** as a bill credit. Eligi
 - **Intelligent Dispatching**: Real-time status of Octopus Intelligent charge scheduling
 - **Octopus Historical Data Readout**: Read historical consumption and meter readings stored by Octopus
 - **Energy Dashboard Statistics**: Reconcile late or corrected Octopus consumption readings over the last 30 completed local days; incomplete or conflicting intervals do not overwrite existing hours.
+- **Electricity Cost Statistics**: External statistic `octopus_germany:electricity_<account>_cost` (EUR, hourly) from quarter-hour consumption multiplied by the quarter-hour dynamic gross price, plus the gross daily standing charge spread evenly over the local day's hours. The API only publishes prices for today and tomorrow, so prices are captured from installation onward (kept 32 days); hours without a captured price are skipped. Fixed-price tariffs use the agreement price. Use it in a `statistics-graph` card with `period: day` or as the grid consumption cost statistic in the Energy Dashboard.
 - **Multi-Account**: Support for multiple Octopus accounts under one integration
 - **Gas infrastructure monitoring** (MALO/MELO numbers, meters, readings)
 - **Latest Electricity meter reading**

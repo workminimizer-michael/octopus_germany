@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from homeassistant.components.recorder.models import StatisticData
 
@@ -49,6 +49,16 @@ def decimal_energy(value: Any) -> Decimal:
     result = Decimal(str(value))
     if not result.is_finite() or result < 0:
         raise ValueError("Invalid energy")
+    return result
+
+
+def decimal_amount(value: Any) -> Decimal:
+    """Parse a finite monetary amount; negative values are valid."""
+    if value is None or isinstance(value, bool):
+        raise ValueError("Missing or boolean amount")
+    result = Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError("Invalid amount")
     return result
 
 
@@ -168,13 +178,17 @@ def rebuild_statistics(
     hourly: dict[datetime, Decimal],
     cutoff: datetime,
     now: datetime,
+    value_parser: Callable[[Any], Decimal] | None = None,
 ) -> tuple[list[StatisticData], int]:
     """
     Rebase from the preceding sum; retain unverified legacy hour consumption.
 
     This external statistic has interval consumption in ``state``. No row before
     cutoff is written, and all subsequent existing sums are corrected together.
+    ``value_parser`` defaults to non-negative energy; cost statistics pass a
+    parser that accepts negative amounts.
     """
+    parse = value_parser or decimal_energy
     replacements = {at: value for at, value in hourly.items() if cutoff <= at < now}
     if not replacements:
         return [], 0
@@ -185,11 +199,11 @@ def rebuild_statistics(
     }
     preceding = [at for at in rows if at < cutoff]
     if preceding:
-        running = decimal_energy(rows[max(preceding)]["sum"])
+        running = parse(rows[max(preceding)]["sum"])
     elif rows:
         first_at = min(rows)
         first = rows[first_at]
-        running = decimal_energy(first["sum"]) - decimal_energy(first["state"])
+        running = parse(first["sum"]) - parse(first["state"])
         if running < 0:
             raise ValueError("Invalid legacy baseline")
         if min(replacements) < first_at and running:
@@ -203,12 +217,10 @@ def rebuild_statistics(
         if at in replacements:
             value = replacements[at]
         else:
-            value = decimal_energy(rows[at]["state"])
+            value = parse(rows[at]["state"])
             unverified += 1
         running += value
         state, total = round(value, 6), round(running, 6)
-        if old is None or (
-            decimal_energy(old["state"]) != state or decimal_energy(old["sum"]) != total
-        ):
+        if old is None or (parse(old["state"]) != state or parse(old["sum"]) != total):
             changes.append({"start": at, "state": float(state), "sum": float(total)})
     return changes, unverified

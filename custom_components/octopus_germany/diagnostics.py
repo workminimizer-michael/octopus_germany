@@ -44,6 +44,7 @@ async def async_get_config_entry_diagnostics(
             "accounts": [
                 {
                     "interval_count": len(account.get("intervals", {})),
+                    "price_count": len(account.get("prices", {})),
                     "pending_statistics_count": len(
                         account.get("pending_statistics", [])
                     ),

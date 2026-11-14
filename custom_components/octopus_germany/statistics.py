@@ -25,8 +25,10 @@ from homeassistant.helpers.storage import Store
 
 from .api.smart_meter import SmartMeterFetchError
 from .const import DOMAIN
+from .cost_statistics import capture_quarter_prices, hourly_costs
 from .statistics_reconciliation import (
     complete_hours,
+    decimal_amount,
     merge_measurements,
     rebuild_statistics,
     utc_datetime,
@@ -45,6 +47,8 @@ _LOGGER = logging.getLogger(__name__)
 RECONCILIATION_VERSION = 1
 LOOKBACK_DAYS = 30
 RECENT_DAYS = 7
+# Prices are kept slightly longer than the consumption window they price.
+PRICE_RETENTION_DAYS = LOOKBACK_DAYS + 2
 FULL_SCAN_HOUR = 6
 STATISTICS_TOLERANCE = 0.0000005
 SCAN_INTERVAL = timedelta(minutes=30)
@@ -126,7 +130,9 @@ class StatisticsReconciler:
                         "Octopus statistics reconciliation failed for %s", account_num
                     )
 
-    async def _async_reconcile(self, account_num: str, now: datetime) -> None:
+    async def _async_reconcile(  # noqa: PLR0915
+        self, account_num: str, now: datetime
+    ) -> None:
         account = (self.coordinator.data or {}).get(account_num, {})
         safe_account = account_num.replace("-", "_").lower()
         statistic_id = f"{DOMAIN}:electricity_{safe_account}_consumption"
@@ -136,6 +142,7 @@ class StatisticsReconciler:
         malo = account.get("malo_number")
         if not properties or not malo:
             return
+        old = await self._async_capture_prices(account_num, account, old, now)
         self.status = {"phase": "fetching", "started_at": now.isoformat()}
         zone = self.hass.config.time_zone
         local_now = now.astimezone(ZoneInfo(zone))
@@ -213,6 +220,7 @@ class StatisticsReconciler:
         candidate = deepcopy(self.data)
         candidate["accounts"][account_num] = {
             "intervals": intervals,
+            "prices": old.get("prices", {}),
             "last_success": now.isoformat(),
             "last_full_scan": (
                 local_now.date() - timedelta(days=local_now.hour < FULL_SCAN_HOUR)
@@ -248,6 +256,109 @@ class StatisticsReconciler:
             unverified,
             len(changes),
         )
+        try:
+            await self._async_reconcile_costs(
+                account_num, account, intervals, conflicts, cutoff, now
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Cost statistics never block the consumption checkpoint.
+            _LOGGER.exception("Octopus %s cost statistics failed", account_num)
+
+    async def _async_capture_prices(
+        self,
+        account_num: str,
+        account: Mapping[str, Any],
+        old: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist today's/tomorrow's quarter prices before they disappear."""
+        retained_start, _ = window_bounds(
+            now, self.hass.config.time_zone, PRICE_RETENTION_DAYS
+        )
+        cached = old.get("prices", {})
+        prices, changed = capture_quarter_prices(
+            cached, account.get("products") or [], retained_start
+        )
+        if not changed and len(prices) == len(cached):
+            return old
+        updated = deepcopy(self.data)
+        account_store = updated["accounts"].setdefault(account_num, {})
+        account_store["prices"] = prices
+        await self.store.async_save(updated)
+        self.data = updated
+        _LOGGER.debug(
+            "Octopus %s: captured %d changed quarter prices (%d cached)",
+            account_num,
+            changed,
+            len(prices),
+        )
+        return account_store
+
+    async def _async_reconcile_costs(  # noqa: PLR0913
+        self,
+        account_num: str,
+        account: Mapping[str, Any],
+        intervals: dict[str, Any],
+        conflicts: set[str],
+        cutoff: datetime,
+        now: datetime,
+    ) -> None:
+        """Write hourly gross cost (quarter price x quarter consumption + standing)."""
+        safe_account = account_num.replace("-", "_").lower()
+        statistic_id = f"{DOMAIN}:electricity_{safe_account}_cost"
+        prices = self.data["accounts"].get(account_num, {}).get("prices", {})
+        costs, counts = hourly_costs(
+            intervals,
+            conflicts,
+            prices,
+            account.get("products") or [],
+            self.hass.config.time_zone,
+        )
+        changes: list[StatisticData] = []
+        if costs:
+            recorder = get_instance(self.hass)
+            history = await recorder.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                datetime(1970, 1, 1, tzinfo=UTC),
+                None,
+                {statistic_id},
+                "hour",
+                None,
+                {"state", "sum"},
+            )
+            changes, _ = rebuild_statistics(
+                history.get(statistic_id, []),
+                costs,
+                cutoff,
+                now,
+                value_parser=decimal_amount,
+            )
+            if changes:
+                meter = (account.get("meter") or {}).get("number", account_num)
+                await self._async_write_statistics(
+                    account_num,
+                    statistic_id,
+                    account,
+                    changes,
+                    name=f"Electricity Cost ({meter}/{account_num})",
+                    unit="EUR",
+                    unit_class=None,
+                    units=None,
+                )
+        _LOGGER.info(
+            "Octopus %s cost statistics: priced_hours=%d, written_hours=%d, "
+            "missing_price_hours=%d, missing_standing_charge_hours=%d, "
+            "cached_prices=%d",
+            account_num,
+            len(costs),
+            len(changes),
+            counts["missing_price_hours"],
+            counts["missing_standing_charge_hours"],
+            len(prices),
+        )
 
     async def _async_replay_pending_statistics(
         self, account_num: str, statistic_id: str, account: Mapping[str, Any]
@@ -271,27 +382,34 @@ class StatisticsReconciler:
         await self.store.async_save(recovered)
         self.data = recovered
 
-    async def _async_write_statistics(
+    async def _async_write_statistics(  # noqa: PLR0913
         self,
         account_num: str,
         statistic_id: str,
         account: Mapping[str, Any],
         changes: list[StatisticData],
+        *,
+        name: str | None = None,
+        unit: str = "kWh",
+        unit_class: str | None = "energy",
+        units: dict[str, str] | None = None,
     ) -> None:
         """Replay a durable batch and verify it before advancing the checkpoint."""
         self.status.update(phase="writing_statistics", changed_hours=len(changes))
         meter = (account.get("meter") or {}).get("number", account_num)
+        if units is None and unit_class == "energy":
+            units = {"energy": unit}
         async_add_external_statistics(
             self.hass,
             StatisticMetaData(
                 has_mean=False,
                 mean_type=StatisticMeanType.NONE,
                 has_sum=True,
-                name=f"Electricity Consumption ({meter}/{account_num})",
+                name=name or f"Electricity Consumption ({meter}/{account_num})",
                 source=DOMAIN,
                 statistic_id=statistic_id,
-                unit_of_measurement="kWh",
-                unit_class="energy",
+                unit_of_measurement=unit,
+                unit_class=unit_class,
             ),
             changes,
         )
@@ -308,7 +426,7 @@ class StatisticsReconciler:
             None,
             {statistic_id},
             "hour",
-            {"energy": "kWh"},
+            units,
             {"state", "sum"},
         )
         verified = {
