@@ -1,6 +1,6 @@
 # Release Notes
 
-## Version 0.0.205 (2026-11-14)
+## Version 0.0.206 (2026-11-14)
 
 ### Fixes
 
