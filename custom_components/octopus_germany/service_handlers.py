@@ -19,7 +19,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from xlsxwriter.exceptions import XlsxWriterException
 
-from .api.smart_meter import SmartMeterFetchError
+from .api.smart_meter import SmartMeterFetchError, is_consumption_reading
 from .const import (
     CONF_EXPORT_DOWNLOAD_LINK_VALIDITY_HOURS,
     DEFAULT_EXPORT_DOWNLOAD_TOKEN_TTL_HOURS,
@@ -79,6 +79,7 @@ _TIME_PARTS_MIN = 2
 _MAX_HOUR = 23
 _MAX_MINUTE = 59
 _SAMPLE_READINGS_COUNT = 3
+_RAW_INTERVAL_SECONDS = 900
 _EAM_GRID_OPERATOR_CODE = "9900330000004"
 _EAM_2025_MODULE3_VALID_FROM = "2025-04-01T00:00:00+02:00"
 _EAM_2025_MODULE3_VALID_TO = "2026-01-01T00:00:00+01:00"
@@ -302,6 +303,59 @@ def _measurement_range_bounds(
         end_date + timedelta(days=1), time.min, tzinfo=local_timezone
     )
     return start_at.astimezone(UTC).isoformat(), end_at.astimezone(UTC).isoformat()
+
+
+async def _fetch_raw_day_readings(
+    client: Any,
+    property_id: str,
+    market_supply_point_id: str,
+    day: date,
+    timezone: str,
+) -> tuple[list[dict[str, Any]] | None, int, str | None]:
+    """Fetch raw 15-minute consumption intervals for one local day."""
+    start_at, end_at = _measurement_range_bounds(day, day, timezone)
+    expected = int(
+        (
+            datetime.fromisoformat(end_at) - datetime.fromisoformat(start_at)
+        ).total_seconds()
+        // _RAW_INTERVAL_SECONDS
+    )
+    try:
+        raw_readings = await client.fetch_electricity_measurements_range(
+            property_id,
+            market_supply_point_id,
+            start_at,
+            end_at,
+            timezone,
+            "15min",
+        )
+    except SmartMeterFetchError as err:
+        _LOGGER.warning(
+            "Raw 15-minute readings unavailable for %s: %s", day.isoformat(), err
+        )
+        return None, expected, str(err)
+
+    raw_readings = raw_readings or []
+    readings = [r for r in raw_readings if is_consumption_reading(r)]
+    _LOGGER.debug(
+        "Raw 15-minute readings for %s: %d returned, %d consumption, %d expected",
+        day.isoformat(),
+        len(raw_readings),
+        len(readings),
+        expected,
+    )
+    return readings, expected, None
+
+
+def _sum_reading_values(readings: list[dict[str, Any]]) -> float:
+    """Sum reading values, skipping values that are not numeric."""
+    total = 0.0
+    for reading in readings:
+        try:
+            total += float(reading.get("value") or 0)
+        except TypeError, ValueError:
+            continue
+    return round(total, 6)
 
 
 def _group_readings_by_local_date(
@@ -656,20 +710,23 @@ async def async_register_services(
         property_id = call.data.get(ATTR_PROPERTY_ID)
 
         # Validate date format
-        _parse_iso_date(date_str, "date")
+        day = _parse_iso_date(date_str, "date")
 
         # Get the coordinator for this account
         account_coordinator, client = _resolve_account_context(hass, account_number)
+        account_data = account_coordinator.data[account_number]
 
         # Use property_id from service call or get first property from account
         if not property_id:
-            account_data = account_coordinator.data[account_number]
             property_ids = account_data.get("property_ids", [])
             if not property_ids:
                 _raise_validation_error(
                     f"No properties found for account {account_number}"
                 )
             property_id = property_ids[0]
+
+        market_supply_point_id = account_data.get("malo_number")
+        timezone = hass.config.time_zone
 
         _LOGGER.info(
             "Fetching smart meter readings for account %s, property %s, date %s",
@@ -679,10 +736,28 @@ async def async_register_services(
         )
 
         try:
-            # Fetch smart meter readings
-            readings = await client.fetch_electricity_smart_meter_readings_v2(
-                account_number, property_id, date_str
-            )
+            readings: list[dict[str, Any]] | None = None
+            source = "raw_15min"
+            expected_readings = None
+            raw_error = None
+
+            # Preferred source: raw 15-minute intervals for the local day.
+            if market_supply_point_id:
+                readings, expected_readings, raw_error = await _fetch_raw_day_readings(
+                    client, property_id, market_supply_point_id, day, timezone
+                )
+            else:
+                _LOGGER.debug(
+                    "No electricity MaLo for account %s; using legacy query",
+                    account_number,
+                )
+
+            # Legacy fallback when no raw data is available.
+            if not readings:
+                source = "legacy_v2"
+                readings = await client.fetch_electricity_smart_meter_readings_v2(
+                    account_number, property_id, date_str
+                )
 
             if readings:
                 result = {
@@ -690,11 +765,19 @@ async def async_register_services(
                     "account_number": account_number,
                     "property_id": property_id,
                     "date": date_str,
+                    "source": source,
+                    "timezone": timezone,
                     "total_readings": len(readings),
-                    "readings": readings,
-                    "total_consumption": sum(
-                        float(r.get("value", 0)) for r in readings
+                    "expected_readings": (
+                        expected_readings if source == "raw_15min" else None
                     ),
+                    "complete": (
+                        len(readings) >= expected_readings
+                        if source == "raw_15min" and expected_readings
+                        else None
+                    ),
+                    "readings": readings,
+                    "total_consumption": _sum_reading_values(readings),
                 }
                 _LOGGER.info(
                     "Successfully fetched %d smart meter readings for %s",
@@ -716,10 +799,14 @@ async def async_register_services(
                     "account_number": account_number,
                     "property_id": property_id,
                     "date": date_str,
+                    "source": None,
+                    "timezone": timezone,
                     "total_readings": 0,
                     "readings": [],
                     "message": f"No smart meter readings found for {date_str}",
                 }
+                if raw_error:
+                    result["raw_error"] = raw_error
                 _LOGGER.warning("No smart meter readings found for %s", date_str)
 
             # Fire an event with the results

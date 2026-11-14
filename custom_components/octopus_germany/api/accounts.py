@@ -30,17 +30,13 @@ from .queries import (
     COMPREHENSIVE_QUERY,
     INTELLIGENT_DATA_QUERY,
 )
+from .smart_meter import is_consumption_reading
 
 _LOGGER = logging.getLogger(__name__)
 
 _MEASUREMENT_TIMEZONE = "Europe/Berlin"
 _PREVIOUS_DAY_LOOKBACK_DAYS = 3
 _RAW_INTERVAL_SECONDS = 900
-# Reading directions that are not grid consumption. Everything else
-# (CONSUMPTION, IMPORT, missing, ...) counts as consumption.
-_NON_CONSUMPTION_DIRECTIONS = frozenset(
-    {"EXPORT", "FEED_IN", "GENERATION", "INJECTION"}
-)
 
 
 def _extract_malo_number(property_data: dict[str, Any]) -> str | None:
@@ -49,12 +45,6 @@ def _extract_malo_number(property_data: dict[str, Any]) -> str | None:
         if malo_number := malo.get("maloNumber"):
             return str(malo_number)
     return None
-
-
-def _is_consumption_reading(reading: dict[str, Any]) -> bool:
-    """Return True unless the reading is explicitly a feed-in/export interval."""
-    direction = str(reading.get("reading_direction") or "").upper()
-    return direction not in _NON_CONSUMPTION_DIRECTIONS
 
 
 def _summarize_readings(readings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -144,7 +134,7 @@ class AccountApiMixin:
                 return partial
 
             readings = readings or []
-            consumption = [r for r in readings if _is_consumption_reading(r)]
+            consumption = [r for r in readings if is_consumption_reading(r)]
             expected = int((end - start).total_seconds()) // _RAW_INTERVAL_SECONDS
             _LOGGER.debug(
                 "RAW_INTERVAL response for %s: %d returned, %d consumption, "

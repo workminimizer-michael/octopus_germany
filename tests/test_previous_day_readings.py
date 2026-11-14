@@ -14,8 +14,13 @@ from custom_components.octopus_germany.api.accounts import (
     _extract_malo_number,
     _local_day_bounds,
 )
+from custom_components.octopus_germany.api.smart_meter import SmartMeterFetchError
 from custom_components.octopus_germany.models import TariffCapabilities
 from custom_components.octopus_germany.octopus_germany import OctopusGermany
+from custom_components.octopus_germany.service_handlers import (
+    _fetch_raw_day_readings,
+    _sum_reading_values,
+)
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
@@ -165,6 +170,70 @@ class FetchAllDataPreviousDayTests(unittest.TestCase):
         api.fetch_electricity_smart_meter_readings.assert_not_awaited()
         api.fetch_electricity_smart_meter_readings_v2.assert_not_awaited()
         self.assertNotIn("electricity_smart_meter_readings", result)
+
+
+class ServiceRawDayReadingsTests(unittest.TestCase):
+    """get_smart_meter_readings uses raw 15-minute data for one local day."""
+
+    def test_fetches_local_day_and_filters_feed_in(self):
+        readings = _intervals(date(2026, 11, 7), 96)
+        readings[0]["reading_direction"] = "FEED_IN"
+        readings[1]["reading_direction"] = "IMPORT"
+        client = Mock(
+            fetch_electricity_measurements_range=AsyncMock(return_value=readings)
+        )
+        result, expected, error = asyncio.run(
+            _fetch_raw_day_readings(
+                client, "p1", "m1", date(2026, 11, 7), "Europe/Berlin"
+            )
+        )
+        self.assertEqual(len(result), 95)
+        self.assertEqual(expected, 96)
+        self.assertIsNone(error)
+        args = client.fetch_electricity_measurements_range.await_args.args
+        self.assertEqual(
+            args,
+            (
+                "p1",
+                "m1",
+                "2026-11-06T23:00:00+00:00",
+                "2026-11-07T23:00:00+00:00",
+                "Europe/Berlin",
+                "15min",
+            ),
+        )
+
+    def test_dst_day_expects_100_intervals(self):
+        client = Mock(fetch_electricity_measurements_range=AsyncMock(return_value=[]))
+        result, expected, _ = asyncio.run(
+            _fetch_raw_day_readings(
+                client, "p1", "m1", date(2026, 10, 25), "Europe/Berlin"
+            )
+        )
+        self.assertEqual(result, [])
+        self.assertEqual(expected, 100)
+
+    def test_fetch_error_is_reported(self):
+        client = Mock(
+            fetch_electricity_measurements_range=AsyncMock(
+                side_effect=SmartMeterFetchError("backoff")
+            )
+        )
+        result, _, error = asyncio.run(
+            _fetch_raw_day_readings(
+                client, "p1", "m1", date(2026, 11, 7), "Europe/Berlin"
+            )
+        )
+        self.assertIsNone(result)
+        self.assertEqual(error, "backoff")
+
+    def test_sum_skips_invalid_values(self):
+        self.assertEqual(
+            _sum_reading_values(
+                [{"value": "0.25"}, {"value": None}, {"value": "x"}, {"value": 1}]
+            ),
+            1.25,
+        )
 
 
 if __name__ == "__main__":

@@ -97,6 +97,8 @@ data:
 ### `octopus_germany.get_smart_meter_readings`
 
 Liest iMSys-Daten fuer ein bestimmtes Datum.
+
+Liefert die 15-Minuten-Verbrauchswerte der Strom-MaLo fuer den lokalen Kalendertag in der Home-Assistant-Zeitzone (96 Werte; 92/100 an Zeitumstellungstagen). Einspeisewerte werden ausgeschlossen. Ist keine MaLo bekannt oder liefert die API keine Rohdaten, wird die alte Stundenabfrage als Fallback genutzt. Die Antwort enthaelt `source` (`raw_15min` oder `legacy_v2`), `total_readings`, `expected_readings`, `complete`, `total_consumption` und `readings`.
 Die Service-Antwort wird auch als Event `octopus_germany_smart_meter_readings_result` gesendet.
 
 Eingaben:

@@ -40,7 +40,7 @@ refresh_intelligent_data:
 
 get_smart_meter_readings:
   name: Get Smart Meter Readings
-  description: Fetch smart meter readings for a specific date (historical). Results are returned in the service response and as event `octopus_germany_smart_meter_readings_result` (subscribe via Developer Tools → Events).
+  description: Fetch smart meter readings for a specific date (historical) as raw 15-minute consumption intervals for the electricity MaLo, using local calendar-day boundaries in the Home Assistant timezone; feed-in intervals are excluded. Falls back to the legacy hourly query when no raw data or MaLo is available. The response includes `source`, `expected_readings` and `complete`. Results are returned in the service response and as event `octopus_germany_smart_meter_readings_result` (subscribe via Developer Tools → Events).
   fields:
     account_number:
       name: Account Number
@@ -51,7 +51,7 @@ get_smart_meter_readings:
         text:
     date:
       name: Date
-      description: Date for readings (YYYY-MM-DD format, data available 2+ days ago)
+      description: Date for readings (YYYY-MM-DD format, local Home Assistant calendar day; data is usually available from the next day)
       required: true
       example: "2025-10-08"
       selector:

@@ -1,5 +1,19 @@
 # Release Notes
 
+## Version 0.0.209 (2026-11-14)
+
+### Changes
+
+- `octopus_germany.get_smart_meter_readings` now returns raw 15-minute
+  consumption intervals for the electricity MaLo over the local calendar day
+  (Home Assistant timezone, DST-aware). Feed-in/export intervals are
+  excluded. The legacy hourly V2 query is only used as a fallback when no MaLo
+  is known or no raw data is returned. The response adds `source`
+  (`raw_15min`/`legacy_v2`), `timezone`, `expected_readings`, `complete`
+  and, on failure, `raw_error`; `total_consumption` skips non-numeric values.
+- The feed-in/export direction filter is shared between the
+  `Previous Accumulative Consumption Electricity` sensor and the service.
+
 ## Version 0.0.208 (2026-11-14)
 
 ### Fixes

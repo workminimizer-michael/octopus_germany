@@ -88,6 +88,8 @@ data:
 
 Fetch iMSys data for a specific date.
 
+Returns raw 15-minute consumption intervals for the electricity MaLo over the local calendar day in the Home Assistant timezone (96 intervals; 92/100 on DST change days). Feed-in/export intervals are excluded. If no MaLo is known or no raw data is returned, the legacy hourly query is used as a fallback. The response contains `source` (`raw_15min` or `legacy_v2`), `total_readings`, `expected_readings`, `complete`, `total_consumption` and `readings`; it is also sent as event `octopus_germany_smart_meter_readings_result`.
+
 Parameters:
 
 - `account_number` (required): `A-xxxxxxxx`
