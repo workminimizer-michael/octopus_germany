@@ -52,7 +52,7 @@ Wenn du über [meinen Empfehlungslink](https://octopusenergy.de/empfehlungen?ref
 - SmartFlex-Geraetestatus, Dispatching, Session-Daten
 - Schalter fuer Smart Control und Boost Charge
 - Fahrzeug- und Ladepunktdaten wie SoC und Batteriegroesse, sofern vom Anbieter geliefert
-- **Smart-Meter-Readings**: Vortagsverbrauch akkumuliert mit stundenweiser Aufschluesselung (aus bei Octopus gespeicherten Zaehlerdaten)
+- **Smart-Meter-Readings**: Vortagsverbrauch (`Previous Accumulative Consumption Electricity`) als Summe der bei Octopus gespeicherten 15-Minuten-Werte der Strom-MaLo (Kalendertag Europe/Berlin, bis zu 3 Tage zurueck; erster vollstaendiger Tag gewinnt, Stundenabfrage als Fallback)
 - Zaehlerregistersensoren fuer verwertbare OBIS-Register mit Messwerthistorie; Nullwerte bleiben gueltige Messwerte
 - **Historische Octopus-Daten auslesen**: Historische Verbrauchs- und Zaehlerdaten aus dem Octopus-System abrufen
 - Strom- und Gaszaehlerstaende an die OE-API uebermitteln; Einreichungen unterstuetzen Tageswerte, keine 15-Minuten-Intervalle

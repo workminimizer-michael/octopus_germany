@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiohttp import ClientError
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -31,9 +32,95 @@ from .queries import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_MEASUREMENT_TIMEZONE = "Europe/Berlin"
+_PREVIOUS_DAY_LOOKBACK_DAYS = 3
+_RAW_INTERVAL_SECONDS = 900
+
+
+def _extract_malo_number(property_data: dict[str, Any]) -> str | None:
+    """Return the first electricity MaLo number of a property."""
+    for malo in property_data.get("electricityMalos") or []:
+        if malo_number := malo.get("maloNumber"):
+            return str(malo_number)
+    return None
+
+
+def _local_day_bounds(day: date, zone: ZoneInfo) -> tuple[datetime, datetime]:
+    """Return UTC start/end of a local calendar day (DST-aware)."""
+    start = datetime.combine(day, time.min, tzinfo=zone)
+    end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+    return start.astimezone(UTC), end.astimezone(UTC)
+
 
 class AccountApiMixin:
     """Mixin that provides account/capability and orchestration API calls."""
+
+    async def _fetch_previous_day_raw_readings(
+        self, property_id: str, malo_number: str | None
+    ) -> tuple[list[dict[str, Any]], str, str] | None:
+        """
+        Fetch raw 15-minute consumption intervals for the latest available day.
+
+        Checks yesterday and earlier days (local German time). The first
+        complete day wins; otherwise the most recent day with data is used.
+        Returns (readings, date, label) or None.
+        """
+        if not malo_number:
+            return None
+
+        zone = ZoneInfo(_MEASUREMENT_TIMEZONE)
+        today = datetime.now(zone).date()
+        partial: tuple[list[dict[str, Any]], str, str] | None = None
+
+        for days_back in range(1, _PREVIOUS_DAY_LOOKBACK_DAYS + 1):
+            day = today - timedelta(days=days_back)
+            start, end = _local_day_bounds(day, zone)
+            try:
+                readings = await self.fetch_electricity_measurements_range(
+                    property_id,
+                    malo_number,
+                    start.isoformat(),
+                    end.isoformat(),
+                    _MEASUREMENT_TIMEZONE,
+                    "15min",
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Raw smart-meter readings unavailable for %s: %s",
+                    day.isoformat(),
+                    err,
+                )
+                return partial
+
+            consumption = [
+                reading
+                for reading in readings or []
+                if reading.get("reading_direction") in (None, "CONSUMPTION")
+            ]
+            if not consumption:
+                _LOGGER.debug("No raw smart-meter readings for %s", day.isoformat())
+                continue
+
+            label = "yesterday" if days_back == 1 else f"{days_back}_days_ago"
+            expected = int((end - start).total_seconds()) // _RAW_INTERVAL_SECONDS
+            if len(consumption) >= expected:
+                _LOGGER.debug(
+                    "Fetched %d raw smart-meter readings for %s",
+                    len(consumption),
+                    day.isoformat(),
+                )
+                return consumption, day.isoformat(), label
+
+            _LOGGER.debug(
+                "Raw smart-meter readings for %s incomplete (%d/%d)",
+                day.isoformat(),
+                len(consumption),
+                expected,
+            )
+            if partial is None:
+                partial = (consumption, day.isoformat(), label)
+
+        return partial
 
     async def fetch_agreement_standing_charges(
         self, account_number: str
@@ -580,14 +667,30 @@ class AccountApiMixin:
 
                             _LOGGER.debug(
                                 "Fetching smart meter readings for recent dates: %s",
-                                [date.isoformat() for date, _ in test_dates],
+                                [day.isoformat() for day, _ in test_dates],
                             )
 
                             smart_meter_readings = None
                             successful_date = None
 
-                            # Test each date until we find data.
-                            for date_value, date_label in test_dates:
+                            # Preferred source: raw 15-minute intervals for the
+                            # MaLo. Many meters do not provide HOUR_INTERVAL data.
+                            raw_result = await self._fetch_previous_day_raw_readings(
+                                property_id,
+                                _extract_malo_number(property_data),
+                            )
+                            if raw_result:
+                                (
+                                    smart_meter_readings,
+                                    raw_date,
+                                    raw_label,
+                                ) = raw_result
+                                successful_date = (raw_date, raw_label)
+
+                            # Legacy hourly queries as fallback.
+                            for date_value, date_label in (
+                                test_dates if smart_meter_readings is None else []
+                            ):
                                 date_str = date_value.isoformat()
                                 _LOGGER.debug(
                                     "Fetching electricity smart meter readings "

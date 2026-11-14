@@ -1,5 +1,16 @@
 # Release Notes
 
+## Version 0.0.205 (2026-11-14)
+
+### Fixes
+
+- `Previous Accumulative Consumption Electricity` no longer stays `unknown`
+  for meters that only provide raw 15-minute data. The sensor now fetches
+  `RAW_INTERVAL` measurements for the electricity MaLo over the previous
+  Europe/Berlin calendar day (DST-aware), checks up to 3 days back, prefers
+  the first complete day and ignores feed-in intervals. The previous
+  `HOUR_INTERVAL` queries remain as a fallback.
+
 ## Version 0.0.204 (2026-11-07)
 
 ### Fixes

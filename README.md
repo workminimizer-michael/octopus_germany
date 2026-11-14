@@ -57,7 +57,7 @@ Sign up through my referral link and receive **150 €** as a bill credit. Eligi
 - **Agreement History**: All agreements returned by OE, including past, active and scheduled entries, with gross/net unit prices, VAT, and net/gross monthly standing charges with validity dates in electricity price sensor attributes
 - **Multi-Ledger Support**: Electricity, Gas, Heat, and other ledger types
 - **Smart Charging Sessions**: Track sessions and reward-related data
-- **Smart Meter Readings**: Previous-day consumption with an hourly breakdown from Octopus-stored meter data
+- **Smart Meter Readings**: Previous-day consumption (`Previous Accumulative Consumption Electricity`) summed from Octopus-stored 15-minute intervals for the electricity MaLo (Europe/Berlin calendar day, up to 3 days back; first complete day wins, hourly queries as fallback)
 - **Energy Dashboard Statistics**: Reconcile late or corrected Octopus consumption readings over the last 30 completed local days; incomplete or conflicting intervals do not overwrite existing hours.
 - **Meter Register Sensors**: Per-meter entities are created only for OBIS registers with usable numeric readings; empty or invalid registers do not create sensors, while zero remains valid. Each sensor exposes the complete history for its register and raw meter classification fields. Devices use the reported type, or `Electricity Meter` when the API omits it.
 - **Octopus Historical Data Readout**: Read historical consumption and meter readings stored by Octopus
