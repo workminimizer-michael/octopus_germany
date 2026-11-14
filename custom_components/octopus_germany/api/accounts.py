@@ -695,7 +695,7 @@ class AccountApiMixin:
                                     # Retry with new token
                                     return await self.fetch_all_data(account_number)
 
-                # Fetch electricity smart meter readings only when supported.
+                # Fetch previous-day electricity readings (MaLo or smart meter).
                 try:
                     all_properties = (result.get("account") or {}).get(
                         "allProperties"
@@ -711,10 +711,14 @@ class AccountApiMixin:
                                 for p in all_properties
                             ],
                         )
+                    # Raw 15-minute measurements only need an electricity
+                    # MaLo (like the Energy Dashboard statistics); some
+                    # iMSys meters do not report shouldReceiveSmartMeterData.
+                    has_malo = any(_extract_malo_number(p) for p in all_properties)
                     if (
                         include_meter_readings
-                        and capabilities.has_smart_meter
                         and all_properties
+                        and (capabilities.has_smart_meter or has_malo)
                     ):
                         # Prefer the first property that has an electricity MaLo.
                         property_data = next(
@@ -773,7 +777,10 @@ class AccountApiMixin:
 
                             # Legacy hourly queries as fallback.
                             for date_value, date_label in (
-                                test_dates if smart_meter_readings is None else []
+                                test_dates
+                                if smart_meter_readings is None
+                                and capabilities.has_smart_meter
+                                else []
                             ):
                                 date_str = date_value.isoformat()
                                 _LOGGER.debug(
@@ -826,6 +833,13 @@ class AccountApiMixin:
                                     successful_date[1],
                                     _summarize_readings(smart_meter_readings),
                                 )
+                            elif not capabilities.has_smart_meter:
+                                _LOGGER.debug(
+                                    "No raw smart-meter readings for account %s; "
+                                    "legacy queries skipped because no meter "
+                                    "reports shouldReceiveSmartMeterData",
+                                    account_number,
+                                )
                             else:
                                 _LOGGER.warning(
                                     "No smart meter readings found for any tested date"
@@ -876,8 +890,9 @@ class AccountApiMixin:
                             "Smart-meter readings skipped for account %s: %s",
                             account_number,
                             "no property data"
-                            if capabilities.has_smart_meter
-                            else "no meter reports shouldReceiveSmartMeterData",
+                            if not all_properties
+                            else "no electricity MaLo and no meter reports "
+                            "shouldReceiveSmartMeterData",
                         )
                 except Exception as smart_meter_error:
                     _LOGGER.warning(

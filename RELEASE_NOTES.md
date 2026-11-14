@@ -1,5 +1,16 @@
 # Release Notes
 
+## Version 0.0.208 (2026-11-14)
+
+### Fixes
+
+- `Previous Accumulative Consumption Electricity` stayed `unknown` for meters
+  (e.g. iMSys) that do not report `shouldReceiveSmartMeterData`, because the
+  previous-day fetch was skipped entirely. Raw 15-minute readings are now
+  requested for every account with an electricity MaLo, matching the Energy
+  Dashboard statistics. Legacy hourly/V2 fallback queries still run only for
+  accounts reporting smart-meter support.
+
 ## Version 0.0.207 (2026-11-14)
 
 ### Fixes

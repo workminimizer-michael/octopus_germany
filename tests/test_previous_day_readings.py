@@ -3,7 +3,7 @@
 import asyncio
 import unittest
 from datetime import UTC, date, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
 import homeassistant  # noqa: F401
@@ -14,6 +14,8 @@ from custom_components.octopus_germany.api.accounts import (
     _extract_malo_number,
     _local_day_bounds,
 )
+from custom_components.octopus_germany.models import TariffCapabilities
+from custom_components.octopus_germany.octopus_germany import OctopusGermany
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
@@ -119,6 +121,50 @@ class PreviousDayRawReadingsTests(unittest.TestCase):
         self.assertIsNone(
             asyncio.run(client._fetch_previous_day_raw_readings("p1", None))
         )
+
+
+class FetchAllDataPreviousDayTests(unittest.TestCase):
+    """Raw readings are fetched for MaLo accounts without the smart-meter flag."""
+
+    def _api(self, capabilities):
+        api = object.__new__(OctopusGermany)
+        api.ensure_token = AsyncMock(return_value=True)
+        api.fetch_tariff_capabilities = AsyncMock(return_value=capabilities)
+        response = {
+            "data": {
+                "account": {
+                    "allProperties": [
+                        {"id": "p0", "electricityMalos": []},
+                        {"id": "p1", "electricityMalos": [{"maloNumber": "m1"}]},
+                    ]
+                }
+            }
+        }
+        api._get_graphql_client = Mock(
+            return_value=Mock(execute_async=AsyncMock(return_value=response))
+        )
+        api.fetch_electricity_smart_meter_readings = AsyncMock(return_value=None)
+        api.fetch_electricity_smart_meter_readings_v2 = AsyncMock(return_value=None)
+        return api
+
+    def test_raw_readings_used_without_should_receive_flag(self):
+        api = self._api(TariffCapabilities())
+        readings = _intervals(date(2026, 11, 13), 96)
+        api._fetch_previous_day_raw_readings = AsyncMock(
+            return_value=(readings, "2026-11-13", "yesterday")
+        )
+        result = asyncio.run(api.fetch_all_data("account-test"))
+        api._fetch_previous_day_raw_readings.assert_awaited_once_with("p1", "m1")
+        self.assertEqual(result["electricity_smart_meter_readings"], readings)
+        self.assertEqual(result["electricity_smart_meter_readings_date"], "2026-11-13")
+
+    def test_legacy_queries_skipped_without_should_receive_flag(self):
+        api = self._api(TariffCapabilities())
+        api._fetch_previous_day_raw_readings = AsyncMock(return_value=None)
+        result = asyncio.run(api.fetch_all_data("account-test"))
+        api.fetch_electricity_smart_meter_readings.assert_not_awaited()
+        api.fetch_electricity_smart_meter_readings_v2.assert_not_awaited()
+        self.assertNotIn("electricity_smart_meter_readings", result)
 
 
 if __name__ == "__main__":
