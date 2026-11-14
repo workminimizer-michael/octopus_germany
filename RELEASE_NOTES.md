@@ -1,5 +1,26 @@
 # Release Notes
 
+## Version 0.0.207 (2026-11-14)
+
+### Fixes
+
+- `Previous Accumulative Consumption Electricity` now counts every raw
+  15-minute interval as consumption unless it is explicitly marked as
+  feed-in/export (`EXPORT`, `FEED_IN`, `GENERATION`, `INJECTION`). Previously
+  only `CONSUMPTION` or missing directions were accepted, so other import
+  directions left the sensor `unknown`.
+- Smart-meter readings now use the first property that has an electricity
+  MaLo instead of always the first property of the account.
+
+### Diagnostics
+
+- Extended DEBUG logging for the previous-day consumption: why readings are
+  skipped (smart-meter capability, properties and MaLo numbers), the
+  requested Europe/Berlin day range, and per-day response summaries (count,
+  sum, directions, units, quality, source, MaLo, first/last interval), plus
+  the selected source (raw 15-minute or hourly fallback). Errors include the
+  exception type and, with DEBUG enabled, a stack trace.
+
 ## Version 0.0.206 (2026-11-14)
 
 ### Fixes

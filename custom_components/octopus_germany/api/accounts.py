@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,6 +36,11 @@ _LOGGER = logging.getLogger(__name__)
 _MEASUREMENT_TIMEZONE = "Europe/Berlin"
 _PREVIOUS_DAY_LOOKBACK_DAYS = 3
 _RAW_INTERVAL_SECONDS = 900
+# Reading directions that are not grid consumption. Everything else
+# (CONSUMPTION, IMPORT, missing, ...) counts as consumption.
+_NON_CONSUMPTION_DIRECTIONS = frozenset(
+    {"EXPORT", "FEED_IN", "GENERATION", "INJECTION"}
+)
 
 
 def _extract_malo_number(property_data: dict[str, Any]) -> str | None:
@@ -43,6 +49,36 @@ def _extract_malo_number(property_data: dict[str, Any]) -> str | None:
         if malo_number := malo.get("maloNumber"):
             return str(malo_number)
     return None
+
+
+def _is_consumption_reading(reading: dict[str, Any]) -> bool:
+    """Return True unless the reading is explicitly a feed-in/export interval."""
+    direction = str(reading.get("reading_direction") or "").upper()
+    return direction not in _NON_CONSUMPTION_DIRECTIONS
+
+
+def _summarize_readings(readings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a compact diagnostic summary of measurement readings."""
+    total = 0.0
+    invalid = 0
+    for reading in readings:
+        try:
+            total += float(reading.get("value") or 0)
+        except TypeError, ValueError:
+            invalid += 1
+    starts = sorted(str(r.get("start_time")) for r in readings if r.get("start_time"))
+    return {
+        "count": len(readings),
+        "sum": round(total, 6),
+        "invalid_values": invalid,
+        "first_start": starts[0] if starts else None,
+        "last_start": starts[-1] if starts else None,
+        "directions": dict(Counter(str(r.get("reading_direction")) for r in readings)),
+        "units": dict(Counter(str(r.get("unit")) for r in readings)),
+        "qualities": dict(Counter(str(r.get("reading_quality")) for r in readings)),
+        "sources": dict(Counter(str(r.get("source")) for r in readings)),
+        "malos": dict(Counter(str(r.get("market_supply_point_id")) for r in readings)),
+    }
 
 
 def _local_day_bounds(day: date, zone: ZoneInfo) -> tuple[datetime, datetime]:
@@ -66,6 +102,11 @@ class AccountApiMixin:
         Returns (readings, date, label) or None.
         """
         if not malo_number:
+            _LOGGER.debug(
+                "Previous-day raw readings skipped: property %s has no "
+                "electricity MaLo number",
+                property_id,
+            )
             return None
 
         zone = ZoneInfo(_MEASUREMENT_TIMEZONE)
@@ -75,6 +116,15 @@ class AccountApiMixin:
         for days_back in range(1, _PREVIOUS_DAY_LOOKBACK_DAYS + 1):
             day = today - timedelta(days=days_back)
             start, end = _local_day_bounds(day, zone)
+            _LOGGER.debug(
+                "Requesting RAW_INTERVAL readings for property %s, MaLo %s, "
+                "day %s (%s .. %s)",
+                property_id,
+                malo_number,
+                day.isoformat(),
+                start.isoformat(),
+                end.isoformat(),
+            )
             try:
                 readings = await self.fetch_electricity_measurements_range(
                     property_id,
@@ -86,26 +136,33 @@ class AccountApiMixin:
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Raw smart-meter readings unavailable for %s: %s",
+                    "Raw smart-meter readings unavailable for %s (%s): %s",
                     day.isoformat(),
+                    type(err).__name__,
                     err,
                 )
                 return partial
 
-            consumption = [
-                reading
-                for reading in readings or []
-                if reading.get("reading_direction") in (None, "CONSUMPTION")
-            ]
+            readings = readings or []
+            consumption = [r for r in readings if _is_consumption_reading(r)]
+            expected = int((end - start).total_seconds()) // _RAW_INTERVAL_SECONDS
+            _LOGGER.debug(
+                "RAW_INTERVAL response for %s: %d returned, %d consumption, "
+                "%d expected; summary=%s",
+                day.isoformat(),
+                len(readings),
+                len(consumption),
+                expected,
+                _summarize_readings(readings),
+            )
             if not consumption:
                 _LOGGER.debug("No raw smart-meter readings for %s", day.isoformat())
                 continue
 
             label = "yesterday" if days_back == 1 else f"{days_back}_days_ago"
-            expected = int((end - start).total_seconds()) // _RAW_INTERVAL_SECONDS
             if len(consumption) >= expected:
                 _LOGGER.debug(
-                    "Fetched %d raw smart-meter readings for %s",
+                    "Using %d complete raw smart-meter readings for %s",
                     len(consumption),
                     day.isoformat(),
                 )
@@ -120,6 +177,18 @@ class AccountApiMixin:
             if partial is None:
                 partial = (consumption, day.isoformat(), label)
 
+        if partial is None:
+            _LOGGER.debug(
+                "No raw smart-meter readings for MaLo %s in the last %d days",
+                malo_number,
+                _PREVIOUS_DAY_LOOKBACK_DAYS,
+            )
+        else:
+            _LOGGER.debug(
+                "No complete day found; using partial raw readings for %s (%d)",
+                partial[1],
+                len(partial[0]),
+            )
         return partial
 
     async def fetch_agreement_standing_charges(
@@ -628,15 +697,30 @@ class AccountApiMixin:
 
                 # Fetch electricity smart meter readings only when supported.
                 try:
+                    all_properties = (result.get("account") or {}).get(
+                        "allProperties"
+                    ) or []
+                    if include_meter_readings:
+                        _LOGGER.debug(
+                            "Smart-meter readings for account %s: "
+                            "has_smart_meter=%s, properties=%s",
+                            account_number,
+                            capabilities.has_smart_meter,
+                            [
+                                (p.get("id"), _extract_malo_number(p))
+                                for p in all_properties
+                            ],
+                        )
                     if (
                         include_meter_readings
                         and capabilities.has_smart_meter
-                        and result.get("account")
-                        and "allProperties" in result["account"]
-                        and result["account"]["allProperties"]
+                        and all_properties
                     ):
-                        # Try to get property ID from the first property
-                        property_data = result["account"]["allProperties"][0]
+                        # Prefer the first property that has an electricity MaLo.
+                        property_data = next(
+                            (p for p in all_properties if _extract_malo_number(p)),
+                            all_properties[0],
+                        )
                         property_id = property_data.get("id")
 
                         if property_id:
@@ -733,6 +817,15 @@ class AccountApiMixin:
                                 result["electricity_smart_meter_readings_label"] = (
                                     successful_date[1]
                                 )
+                                _LOGGER.debug(
+                                    "Previous-day consumption for account %s: "
+                                    "source=%s, date=%s, label=%s, summary=%s",
+                                    account_number,
+                                    "raw_15min" if raw_result else "hourly",
+                                    successful_date[0],
+                                    successful_date[1],
+                                    _summarize_readings(smart_meter_readings),
+                                )
                             else:
                                 _LOGGER.warning(
                                     "No smart meter readings found for any tested date"
@@ -778,14 +871,20 @@ class AccountApiMixin:
                             _LOGGER.debug(
                                 "No property ID found for smart meter readings"
                             )
-                    else:
+                    elif include_meter_readings:
                         _LOGGER.debug(
-                            "No property data available for smart meter readings"
+                            "Smart-meter readings skipped for account %s: %s",
+                            account_number,
+                            "no property data"
+                            if capabilities.has_smart_meter
+                            else "no meter reports shouldReceiveSmartMeterData",
                         )
                 except Exception as smart_meter_error:
                     _LOGGER.warning(
-                        "Error fetching smart meter readings (non-critical): %s",
+                        "Error fetching smart meter readings (non-critical, %s): %s",
+                        type(smart_meter_error).__name__,
                         smart_meter_error,
+                        exc_info=_LOGGER.isEnabledFor(logging.DEBUG),
                     )
                     # Continue without smart meter readings as this is not critical
 

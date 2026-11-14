@@ -100,6 +100,17 @@ class PreviousDayRawReadingsTests(unittest.TestCase):
             asyncio.run(client._fetch_previous_day_raw_readings("p1", "m1"))
         )
 
+    def test_other_consumption_directions_are_kept(self):
+        readings = _intervals(date(2026, 11, 13), 96)
+        for index, reading in enumerate(readings):
+            reading["reading_direction"] = "IMPORT" if index % 2 else None
+        client = _Client([readings])
+        result, day, _ = asyncio.run(
+            client._fetch_previous_day_raw_readings("p1", "m1")
+        )
+        self.assertEqual(len(result), 96)
+        self.assertEqual(day, "2026-11-13")
+
     def test_errors_and_missing_malo_return_none(self):
         client = _Client(RuntimeError("backoff"))
         self.assertIsNone(
