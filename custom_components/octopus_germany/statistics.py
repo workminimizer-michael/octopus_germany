@@ -25,7 +25,11 @@ from homeassistant.helpers.storage import Store
 
 from .api.smart_meter import SmartMeterFetchError
 from .const import DOMAIN
-from .cost_statistics import capture_quarter_prices, hourly_costs
+from .cost_statistics import (
+    average_price_summaries,
+    capture_quarter_prices,
+    hourly_costs,
+)
 from .statistics_reconciliation import (
     complete_hours,
     decimal_amount,
@@ -36,7 +40,7 @@ from .statistics_reconciliation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -77,6 +81,20 @@ class StatisticsReconciler:
         self.stopped = False
         self.status: dict[str, Any] = {"phase": "idle"}
         self.next_scheduled_run: datetime | None = None
+        self.price_summaries: dict[str, dict[str, dict[str, Any]]] = {}
+        self._summary_listeners: list[Callable[[], None]] = []
+
+    def async_add_summary_listener(
+        self, listener: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Register a callback for updated average-price summaries."""
+        self._summary_listeners.append(listener)
+
+        def remove() -> None:
+            if listener in self._summary_listeners:
+                self._summary_listeners.remove(listener)
+
+        return remove
 
     async def async_load(self) -> None:
         """Restore intervals and successful full-scan date across restarts."""
@@ -348,6 +366,16 @@ class StatisticsReconciler:
                     unit_class=None,
                     units=None,
                 )
+        self.price_summaries[account_num] = average_price_summaries(
+            intervals,
+            conflicts,
+            prices,
+            account.get("products") or [],
+            self.hass.config.time_zone,
+            now,
+        )
+        for listener in list(self._summary_listeners):
+            listener()
         _LOGGER.info(
             "Octopus %s cost statistics: priced_hours=%d, written_hours=%d, "
             "missing_price_hours=%d, missing_standing_charge_hours=%d, "

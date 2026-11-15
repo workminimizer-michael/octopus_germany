@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .coordinator import OctopusDataCoordinator
+    from .statistics import StatisticsReconciler
 
 from .const import DOMAIN
 from .data_processing import get_electricity_meter_type
@@ -206,6 +207,74 @@ def get_account_device_info(account_number: str) -> DeviceInfo:
     )
 
 
+AVERAGE_PRICE_PERIODS = {
+    "yesterday": "Yesterday",
+    "last_30_days": "Last 30 Days",
+}
+
+
+class OctopusAverageElectricityPriceSensor(SensorEntity):
+    """Consumption-weighted average gross electricity price for a period."""
+
+    _attr_has_entity_name = False
+    _attr_should_poll = False
+    _attr_native_unit_of_measurement = "€/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 4
+    _attr_icon = "mdi:cash-clock"
+
+    def __init__(
+        self, account_number: str, reconciler: StatisticsReconciler, period: str
+    ) -> None:
+        """Initialize the average price sensor."""
+        self._account_number = account_number
+        self._reconciler = reconciler
+        self._period = period
+        label = AVERAGE_PRICE_PERIODS[period]
+        self._attr_name = f"Octopus {account_number} Average Electricity Price {label}"
+        self._attr_unique_id = (
+            f"octopus_{account_number}_average_electricity_price_{period}"
+        )
+
+    def _summary(self) -> dict[str, Any]:
+        return (
+            self._reconciler.price_summaries.get(self._account_number, {}).get(
+                self._period
+            )
+            or {}
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the consumption-weighted average unit price in EUR/kWh."""
+        return self._summary().get("average_price_eur_per_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return totals, the effective price incl. standing charge and coverage."""
+        summary = self._summary()
+        return {
+            key: value
+            for key, value in summary.items()
+            if key != "average_price_eur_per_kwh"
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        return get_account_device_info(self._account_number)
+
+    async def async_added_to_hass(self) -> None:
+        """Update whenever the reconciler publishes new summaries."""
+        self.async_on_remove(
+            self._reconciler.async_add_summary_listener(self._handle_summary_update)
+        )
+
+    @callback
+    def _handle_summary_update(self) -> None:
+        self.async_write_ha_state()
+
+
 def get_device_specific_device_info(
     coordinator_data: CoordinatorData,
     account_number: str,
@@ -329,6 +398,14 @@ async def async_setup_entry(
                 "malo_number"
             ):
                 entities.append(OctopusElectricityBalanceSensor(acc_num, coordinator))
+
+            # Consumption-weighted average prices from quarter-hour costs.
+            reconciler = data.get("statistics_reconciler")
+            if reconciler is not None and account_data.get("malo_number"):
+                entities.extend(
+                    OctopusAverageElectricityPriceSensor(acc_num, reconciler, period)
+                    for period in AVERAGE_PRICE_PERIODS
+                )
 
             # Create gas sensors if account has gas service
             if account_data.get("gas_malo_number"):

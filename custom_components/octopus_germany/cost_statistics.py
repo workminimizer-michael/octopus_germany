@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -137,3 +137,96 @@ def hourly_costs(  # noqa: PLR0913
             standing = Decimal(0)
         result[hour] = energy_cost + standing / _local_day_hours(day, zone)
     return result, counts
+
+
+def average_price(  # noqa: PLR0913
+    intervals: Mapping[str, Mapping[str, Any]],
+    conflicts: set[str],
+    prices: Mapping[str, str],
+    products: Sequence[dict[str, Any]],
+    timezone: str,
+    first_day: date,
+    last_day: date,
+    vat: Decimal = DEFAULT_VAT_FRACTION,
+) -> dict[str, Any]:
+    """
+    Return the consumption-weighted average gross price for local days.
+
+    Only quarters with both consumption and a price are used. The effective
+    price additionally spreads the standing charge of every day that has at
+    least one priced quarter over the priced consumption.
+    """
+    zone = ZoneInfo(timezone)
+    range_start = datetime.combine(first_day, time.min, zone).astimezone(UTC)
+    range_end = datetime.combine(
+        last_day + timedelta(days=1), time.min, zone
+    ).astimezone(UTC)
+    consumption = Decimal(0)
+    energy_cost = Decimal(0)
+    priced_quarters = 0
+    priced_days: set[date] = set()
+    for key, row in intervals.items():
+        at = utc_datetime(key)
+        if key in conflicts or not range_start <= at < range_end:
+            continue
+        price = _quarter_price(key, prices, products, vat)
+        if price is None:
+            continue
+        kwh = Decimal(str(row["value_kwh"]))
+        consumption += kwh
+        energy_cost += kwh * price
+        priced_quarters += 1
+        priced_days.add(at.astimezone(zone).date())
+
+    standing_cost = Decimal(0)
+    missing_standing_days = 0
+    for day in priced_days:
+        noon = datetime.combine(day, time(12), zone)
+        standing = _standing_charge(_select_product(list(products), noon), noon, vat)
+        if standing is None:
+            missing_standing_days += 1
+        else:
+            standing_cost += standing
+
+    expected_quarters = int((range_end - range_start) / QUARTER)
+    total_cost = energy_cost + standing_cost
+    return {
+        "first_day": first_day.isoformat(),
+        "last_day": last_day.isoformat(),
+        "average_price_eur_per_kwh": (
+            round(float(energy_cost / consumption), 6) if consumption else None
+        ),
+        "effective_price_eur_per_kwh": (
+            round(float(total_cost / consumption), 6) if consumption else None
+        ),
+        "consumption_kwh": round(float(consumption), 6),
+        "energy_cost_eur": round(float(energy_cost), 6),
+        "standing_charge_eur": round(float(standing_cost), 6),
+        "total_cost_eur": round(float(total_cost), 6),
+        "priced_quarters": priced_quarters,
+        "expected_quarters": expected_quarters,
+        "coverage_percent": round(100 * priced_quarters / expected_quarters, 1),
+        "complete": priced_quarters == expected_quarters,
+        "priced_days": len(priced_days),
+        "missing_standing_charge_days": missing_standing_days,
+    }
+
+
+def average_price_summaries(  # noqa: PLR0913
+    intervals: Mapping[str, Mapping[str, Any]],
+    conflicts: set[str],
+    prices: Mapping[str, str],
+    products: Sequence[dict[str, Any]],
+    timezone: str,
+    now: datetime,
+    days: int = 30,
+) -> dict[str, dict[str, Any]]:
+    """Return average prices for yesterday and the last ``days`` local days."""
+    yesterday = now.astimezone(ZoneInfo(timezone)).date() - timedelta(days=1)
+    args = (intervals, conflicts, prices, products, timezone)
+    return {
+        "yesterday": average_price(*args, yesterday, yesterday),
+        "last_30_days": average_price(
+            *args, yesterday - timedelta(days=days - 1), yesterday
+        ),
+    }

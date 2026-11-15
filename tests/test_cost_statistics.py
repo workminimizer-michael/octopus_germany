@@ -12,6 +12,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import homeassistant  # noqa: F401
 from homeassistant import loader
@@ -24,8 +25,13 @@ from homeassistant.setup import async_setup_component
 from custom_components.octopus_germany import statistics as s
 from custom_components.octopus_germany import statistics_reconciliation as r
 from custom_components.octopus_germany.cost_statistics import (
+    average_price,
+    average_price_summaries,
     capture_quarter_prices,
     hourly_costs,
+)
+from custom_components.octopus_germany.sensor import (
+    OctopusAverageElectricityPriceSensor,
 )
 
 AT = datetime(2026, 10, 18, 0, tzinfo=UTC)  # 02:00 local, regular 24-hour day
@@ -270,6 +276,17 @@ class CostImporterTests(unittest.IsolatedAsyncioTestCase):
             len(self.persisted["accounts"]["A-TEST"]["prices"]), len(PRICES_CT)
         )
 
+    async def test_average_price_summaries_are_published(self):
+        listener = MagicMock()
+        self.importer.async_add_summary_listener(listener)
+        await self.importer.async_run(NOW)
+        listener.assert_called_once()
+        summaries = self.importer.price_summaries["A-TEST"]
+        self.assertEqual(set(summaries), {"yesterday", "last_30_days"})
+        self.assertAlmostEqual(
+            summaries["last_30_days"]["average_price_eur_per_kwh"], 0.06
+        )
+
     async def test_prices_survive_when_forecast_is_gone(self):
         await self.importer.async_run(NOW)
         self.coordinator.data["A-TEST"]["products"] = [
@@ -298,6 +315,85 @@ class CostImporterTests(unittest.IsolatedAsyncioTestCase):
             await self.importer.async_run(NOW)
         self.assertEqual(self.importer.status["phase"], "complete")
         self.assertIn("intervals", self.persisted["accounts"]["A-TEST"])
+
+
+class AveragePriceTests(unittest.TestCase):
+    def test_consumption_weighted_average_and_effective_price(self):
+        cached, conflicts = intervals()
+        prices, _ = capture_quarter_prices({}, [dynamic_product()], AT)
+        day = AT.astimezone(ZoneInfo("Europe/Berlin")).date()
+        result = average_price(
+            cached, conflicts, prices, [dynamic_product()], "Europe/Berlin", day, day
+        )
+        # 0.06 EUR for 1.0 kWh; plus 1.2 EUR standing charge for that day.
+        self.assertAlmostEqual(result["average_price_eur_per_kwh"], 0.06)
+        self.assertAlmostEqual(result["effective_price_eur_per_kwh"], 1.26)
+        self.assertAlmostEqual(result["consumption_kwh"], 1.0)
+        self.assertAlmostEqual(result["total_cost_eur"], 1.26)
+        self.assertEqual(result["priced_quarters"], 4)
+        self.assertEqual(result["expected_quarters"], 96)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["priced_days"], 1)
+
+    def test_unpriced_quarters_are_excluded_from_weighting(self):
+        cached, conflicts = intervals()
+        prices, _ = capture_quarter_prices({}, [dynamic_product()], AT)
+        prices.pop((AT + 3 * r.QUARTER).isoformat())  # drop the 0.4 kWh quarter
+        day = AT.astimezone(ZoneInfo("Europe/Berlin")).date()
+        result = average_price(
+            cached, conflicts, prices, [dynamic_product()], "Europe/Berlin", day, day
+        )
+        # (.1*.3 + .2*.2 + .3*.1) / .6 kWh = 0.1666...
+        self.assertAlmostEqual(result["average_price_eur_per_kwh"], 0.166667)
+        self.assertEqual(result["priced_quarters"], 3)
+
+    def test_no_data_returns_none(self):
+        day = AT.date()
+        result = average_price({}, set(), {}, [], "Europe/Berlin", day, day)
+        self.assertIsNone(result["average_price_eur_per_kwh"])
+        self.assertEqual(result["coverage_percent"], 0)
+
+    def test_summaries_cover_yesterday_and_last_30_days(self):
+        cached, conflicts = intervals()
+        prices, _ = capture_quarter_prices({}, [dynamic_product()], AT)
+        now = AT + timedelta(days=1)
+        summaries = average_price_summaries(
+            cached, conflicts, prices, [dynamic_product()], "Europe/Berlin", now
+        )
+        self.assertEqual(summaries["yesterday"]["first_day"], "2026-10-18")
+        self.assertEqual(summaries["last_30_days"]["first_day"], "2026-09-19")
+        self.assertEqual(summaries["last_30_days"]["last_day"], "2026-10-18")
+        self.assertAlmostEqual(
+            summaries["last_30_days"]["average_price_eur_per_kwh"], 0.06
+        )
+
+
+class AveragePriceSensorTests(unittest.TestCase):
+    def test_sensor_reads_summary_and_updates_on_notification(self):
+        reconciler = types.SimpleNamespace(
+            price_summaries={},
+            async_add_summary_listener=MagicMock(return_value=MagicMock()),
+        )
+        sensor = OctopusAverageElectricityPriceSensor("A-TEST", reconciler, "yesterday")
+        self.assertIsNone(sensor.native_value)
+        self.assertEqual(
+            sensor.unique_id, "octopus_A-TEST_average_electricity_price_yesterday"
+        )
+        reconciler.price_summaries["A-TEST"] = {
+            "yesterday": {
+                "average_price_eur_per_kwh": 0.2512,
+                "effective_price_eur_per_kwh": 0.3,
+                "complete": True,
+            }
+        }
+        self.assertEqual(sensor.native_value, 0.2512)
+        self.assertEqual(
+            sensor.extra_state_attributes,
+            {"effective_price_eur_per_kwh": 0.3, "complete": True},
+        )
+        sensor.async_on_remove = MagicMock()
+        asyncio.run(sensor.async_added_to_hass())
+        reconciler.async_add_summary_listener.assert_called_once()
 
 
 class RealRecorderCostTests(unittest.IsolatedAsyncioTestCase):

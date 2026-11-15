@@ -1,5 +1,21 @@
 # Release Notes
 
+## Version 0.0.211 (2026-11-15)
+
+### Features
+
+- New sensors `Average Electricity Price Yesterday` and
+  `Average Electricity Price Last 30 Days` (EUR/kWh): consumption-weighted
+  average gross unit price, i.e. the sum of quarter-hour consumption times
+  quarter-hour price divided by the priced consumption. Only quarter-hours
+  with both a reading and a captured price are counted.
+- Attributes: `effective_price_eur_per_kwh` (including the standing charge of
+  every day with priced data), `consumption_kwh`, `energy_cost_eur`,
+  `standing_charge_eur`, `total_cost_eur`, `priced_quarters`,
+  `expected_quarters`, `coverage_percent`, `complete`, `priced_days`,
+  `first_day` and `last_day`.
+- The sensors update after every statistics reconciliation run.
+
 ## Version 0.0.210 (2026-11-14)
 
 ### Features
